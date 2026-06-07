@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from tool_loop_guard import LoopDetectedError, LoopGuard, default_key_fn
@@ -88,12 +90,12 @@ def test_old_match_evicted_before_threshold():
     guard = LoopGuard(window=3, threshold=2)
     guard.record("search", {"q": "x"})  # 1st search
     guard.record("filler", {"k": 1})
-    guard.record("filler", {"k": 2})    # window: [search, filler-1, filler-2]
+    guard.record("filler", {"k": 2})  # window: [search, filler-1, filler-2]
     # The first search is now the oldest. Another search should evict it
     # (since the window holds 3, appending will drop the oldest).
     guard.record("search", {"q": "x"})  # would have been 2nd search, but
-                                        # the first search was evicted first,
-                                        # so this is the 1st again. No raise.
+    # the first search was evicted first,
+    # so this is the 1st again. No raise.
     assert len(guard) == 3
 
 
@@ -199,3 +201,63 @@ def test_loop_detected_error_carries_full_context():
     assert exc.window == 3
     assert exc.threshold == 2
     assert "search" in str(exc)
+
+
+def test_loop_detected_error_is_runtime_error():
+    # Callers should be able to catch it via the broader RuntimeError too.
+    assert issubclass(LoopDetectedError, RuntimeError)
+
+
+# ---- additional public-surface coverage ----------------------------------
+
+
+def test_would_raise_on_empty_buffer_is_false():
+    guard = LoopGuard(window=4, threshold=2)
+    assert guard.would_raise("search", {"q": "x"}) is False
+
+
+def test_would_raise_does_not_consume_toward_threshold():
+    # Repeated peeks must never push the real buffer toward a raise.
+    guard = LoopGuard(window=4, threshold=2)
+    guard.record("search", {"q": "x"})
+    for _ in range(10):
+        assert guard.would_raise("search", {"q": "x"}) is True
+    assert len(guard) == 1
+    # The first real repeat is what raises, proving peeks did not count.
+    with pytest.raises(LoopDetectedError):
+        guard.record("search", {"q": "x"})
+
+
+def test_window_and_threshold_properties_expose_config():
+    guard = LoopGuard(window=6, threshold=4)
+    assert guard.window == 6
+    assert guard.threshold == 4
+
+
+def test_reset_allows_a_fresh_loop_to_be_detected_again():
+    guard = LoopGuard(window=3, threshold=2)
+    guard.record("search", {"q": "x"})
+    with pytest.raises(LoopDetectedError):
+        guard.record("search", {"q": "x"})
+    guard.reset()
+    # After reset the same key starts counting from zero again.
+    guard.record("search", {"q": "x"})
+    with pytest.raises(LoopDetectedError):
+        guard.record("search", {"q": "x"})
+
+
+def test_args_default_to_none_and_match_each_other():
+    guard = LoopGuard(window=4, threshold=2)
+    guard.record("ping")  # args omitted -> None
+    with pytest.raises(LoopDetectedError):
+        guard.record("ping")  # None == None, second call trips threshold
+
+
+def test_package_ships_pep561_typed_marker():
+    # The package advertises types; ensure the PEP 561 marker is installed.
+    import importlib.util
+
+    spec = importlib.util.find_spec("tool_loop_guard")
+    assert spec is not None and spec.submodule_search_locations
+    pkg_dir = pathlib.Path(next(iter(spec.submodule_search_locations)))
+    assert (pkg_dir / "py.typed").is_file()
